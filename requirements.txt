@@ -1,0 +1,13 @@
+# external requirements
+wave>=0.0.2
+librosa>=0.8.0
+pyaudio>=0.2.11
+numpy>=1.19.1
+simpleaudio>=1.0.4
+chatterbot>=1.1.0a7
+gtts>=2.1.1
+pathlib>=1.0.1
+pydub>=0.24.1
+google-cloud
+keras>=2.4.3
+tensorflow>=2.3.0
