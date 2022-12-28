@@ -10,202 +10,143 @@ import tensorflow.compat.v1 as tf
 
 from .utils import smooth_categorical_crossentropy
 
-gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.3)
-gpu_conf = tf.ConfigProto(gpu_options=gpu_options)
-config = tf.ConfigProto(device_count={'GPU': 0})
-
-sess = tf.Session(config=gpu_conf)
-K.set_session(sess)
-
-
+@tf.function
 def preprocess(x):
   x = (x + 0.8) / 7.0
-  x = K.clip(x, -5, 5)
+  x = tf.clip_by_value(x, -5, 5)
   return x
-
 
 def preprocess_raw(x):
   # x = K.pow(10.0, x) - 1.0
   return x
 
-
-Preprocess = Lambda(preprocess)
-
-
-PreprocessRaw = Lambda(preprocess_raw)
-
-
+@tf.function
 def relu6(x):
-  return K.relu(x, max_value=6)
+  return tf.nn.relu6(x)
 
-
+@tf.function
 def _depthwise_conv_block(
         x, num_filter, k, padding='same', use_bias=False,
         dilation_rate=1, intermediate_activation=False,
         strides=1, l2_reg=1e-5):
-  # TODO(fchollet): Implement DepthwiseConv1D
-  x = Lambda(lambda x: K.expand_dims(x, 1))(x)
-  x = DepthwiseConv2D(
+  x = tf.expand_dims(x, 1)
+  x = tf.keras.layers.DepthwiseConv2D(
       (1, k), padding=padding, use_bias=use_bias,
       dilation_rate=dilation_rate, strides=strides,
-      kernel_regularizer=l2(l2_reg))(x)
-  x = Lambda(lambda x: K.squeeze(x, 1))(x)
+      kernel_regularizer=tf.keras.regularizers.l2(l2_reg))(x)
+  x = tf.squeeze(x, 1)
   if intermediate_activation:
-    x = BatchNormalization()(x)
+    x = tf.keras.layers.BatchNormalization()(x)
     x = Activation(relu6)(x)
-  x = Conv1D(num_filter, 1, use_bias=use_bias,
-             kernel_regularizer=l2(l2_reg))(x)
-  x = BatchNormalization()(x)
+  x = tf.keras.layers.Conv1D(num_filter, 1, use_bias=use_bias,
+             kernel_regularizer=tf.keras.regularizers.l2(l2_reg))(x)
+  x = tf.keras.layers.BatchNormalization()(x)
   x = Activation(relu6)(x)
   return x
 
 
+import tensorflow as tf
+
 def time_slice_stack(x, step):
-    x_slices = []
-    for i in range(step):
-        x_slice = x[:, i::step]
-        x_slice = K.expand_dims(x_slice, axis=-1)
-        x_slices.append(x_slice)
-    x_slices = K.concatenate(x_slices, axis=-1)
+    # Get the shape of x
+    shape = tf.shape(x)
+    # Create a sequence of indices for the slices
+    idx = tf.range(start=0, limit=shape[1], delta=step)
+    # Use tf.gather to get the slices from x
+    x_slices = tf.gather(x, idx, axis=1)
+    # Add a new dimension to the slices
+    x_slices = tf.expand_dims(x_slices, axis=-1)
+    # Concatenate the slices along the last dimension
+    x_slices = tf.concat(x_slices, axis=-1)
     return x_slices
 
-
-# TODO(see--): Replace with `tf.contrib.signal.frame`
-# https://www.tensorflow.org/api_docs/python/tf/contrib/signal/frame
 def overlapping_time_slice_stack(x, ksize, stride, padding='SAME'):
-    from tensorflow.image import extract_patches as extract
-    ksizes = [1, 1, ksize, 1]
-    strides = [1, 1, stride, 1]
-    rates = [1, 1, 1, 1]
-    N, W = K.int_shape(x)
-    x_slices = K.reshape(x, [-1, 1, W, 1])
-    x_slices = extract(x_slices, ksizes, strides, rates, padding)
-    x_slices = K.squeeze(x_slices, axis=1)
+    # Use tf.signal.frame to get the overlapping slices
+    x_slices = tf.signal.frame(x, ksize, stride, padding=padding)
     return x_slices
-
 
 def snn_model(input_size=16000, num_classes=11):
-  input_layer = Input(shape=[input_size])
-  activation = 'selu'
-  kernel_initializer = 'lecun_normal'
-  x = input_layer
-  x = Preprocess(x)
-  for num_hidden, dropout_ratio in [
-          (512, 0.1), (256, 0.1), (128, 0.1), (64, 0.05)]:
-      x = Dense(num_hidden, activation=activation,
-                kernel_initializer=kernel_initializer)(x)
-      x = AlphaDropout(dropout_ratio)(x)
+    input_layer = tf.keras.layers.Input(shape=[input_size])
+    activation = 'selu'
+    kernel_initializer = 'lecun_normal'
+    x = input_layer
+    x = Preprocess(x)
+    for num_hidden, dropout_ratio in [
+            (512, 0.1), (256, 0.1), (128, 0.1), (64, 0.05)]:
+        x = tf.keras.layers.Dense(num_hidden, activation=activation,
+                                kernel_initializer=kernel_initializer)(x)
+        x = tf.keras.layers.AlphaDropout(dropout_ratio)(x)
 
-  x = Dense(num_classes, activation='softmax',
-            kernel_initializer=kernel_initializer)(x)
+    x = tf.keras.layers.Dense(num_classes, activation='softmax',
+                            kernel_initializer=kernel_initializer)(x)
 
-  model = Model(input_layer, x, name='speech_model')
-  model.compile(
-      optimizer=keras.optimizers.SGD(lr=0.01, momentum=0.9),
-      loss=keras.losses.categorical_crossentropy,
-      metrics=[keras.metrics.categorical_accuracy])
-  return model
-
+    model = tf.keras.Model(input_layer, x, name='speech_model')
+    model.compile(
+        optimizer=tf.keras.optimizers.SGD(lr=0.01, momentum=0.9),
+        loss=tf.keras.losses.categorical_crossentropy,
+        metrics=[tf.keras.metrics.categorical_accuracy])
+    return model
 
 def simple_model(input_size=16000, num_classes=11):
-  input_layer = Input(shape=[input_size])
-  x = input_layer
-  x = Preprocess(x)
-  x = Dense(num_classes, activation='softmax')(x)
+    input_layer = tf.keras.layers.Input(shape=[input_size])
+    x = input_layer
+    x = Preprocess(x)
+    x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
 
-  model = Model(input_layer, x, name='speech_model')
-  model.compile(
-      optimizer=keras.optimizers.SGD(lr=0.01, momentum=0.9),
-      loss=keras.losses.categorical_crossentropy,
-      metrics=[keras.metrics.categorical_accuracy])
-  return model
+    model = tf.keras.Model(input_layer, x, name='speech_model')
+    model.compile(
+        optimizer=tf.keras.optimizers.SGD(lr=0.01, momentum=0.9),
+        loss=tf.keras.losses.categorical_crossentropy,
 
+import tensorflow as tf
 
 def conv_1d_simple_model(input_size=16000, num_classes=11):
-  """ Creates a 1D model for temporal data. Note: Use only
-  with compute_mfcc = False (e.g. raw waveform data).
-  Args:
-    input_size: How big the input vector is.
-    num_classes: How many classes are to be recognized.
-  Returns:
-    Compiled keras model
-  """
-  input_layer = Input(shape=[input_size])
-  x = input_layer
-  x = PreprocessRaw(x)
-  x = Reshape([-1, 1])(x)
+    input_layer = tf.keras.layers.Input(shape=[input_size])
+    x = input_layer
+    x = PreprocessRaw(x)
+    x = tf.keras.layers.Reshape([-1, 1])(x)
 
-  def _reduce_conv(x, num_filters, k, strides=2, padding='valid'):
-    x = _depthwise_conv_block(
-        x, num_filters, k, padding=padding, use_bias=False,
-        strides=strides)
-    return x
+    def _reduce_conv(x, num_filters, k, strides=2, padding='valid'):
+        x = _depthwise_conv_block(
+            x, num_filters, k, padding=padding, use_bias=False,
+            strides=strides)
+        return x
 
-  def _context_conv(x, num_filters, k, dilation_rate=1, padding='valid'):
-    x = _depthwise_conv_block(
-        x, num_filters, k, padding=padding, dilation_rate=dilation_rate,
-        use_bias=False)
-    return x
+    def _context_conv(x, num_filters, k, dilation_rate=1, padding='valid'):
+        x = _depthwise_conv_block(
+            x, num_filters, k, padding=padding, dilation_rate=dilation_rate,
+            use_bias=False)
+        return x
 
-  x = _reduce_conv(x, 32, 31, strides=16)  # 8000
-  x = _context_conv(x, 32, 3)
-  for num_hidden in [64, 96, 128, 160, 192, 224]:
-    x = _reduce_conv(x, num_hidden, 3)  # 4000
-    x = _context_conv(x, num_hidden, 3)
+    x = _reduce_conv(x, 32, 31, strides=16)  # 8000
+    x = _context_conv(x, 32, 3)
+    for num_hidden in [64, 96, 128, 160, 192, 224]:
+        x = _reduce_conv(x, num_hidden, 3)  # 4000
+        x = _context_conv(x, num_hidden, 3)
 
-  x = Bidirectional(GRU(128, dropout=0.2, recurrent_dropout=0.2))(x)
-  x = Dense(num_classes, activation='softmax')(x)
+    x = tf.keras.layers.Bidirectional(tf.keras.layers.GRU(128, dropout=0.2, recurrent_dropout=0.2))(x)
+    x = tf.keras.layers.Dense(num_classes, activation='softmax')(x)
 
-  model = Model(input_layer, x, name='conv_1d_time_stacked')
-  model.compile(
-      optimizer=keras.optimizers.Adam(),
-      loss=keras.losses.categorical_crossentropy,
-      metrics=[keras.metrics.categorical_accuracy])
-  return model
-
+    model = tf.keras.Model(input_layer, x, name='conv_1d_time_stacked')
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(),
+        loss=tf.keras.losses.categorical_crossentropy,
+        metrics=[tf.keras.metrics.categorical_accuracy])
+    return model
 
 def conv_1d_inception_model(input_size=16000, num_classes=11):
-  """ Creates a 1D model for temporal data. Note: Use only
-  with compute_mfcc = False (e.g. raw waveform data).
-  Args:
-    input_size: How big the input vector is.
-    num_classes: How many classes are to be recognized.
-  Returns:
-    Compiled keras model
-  """
-  input_layer = Input(shape=[input_size])
-  x = input_layer
-  x = PreprocessRaw(x)
-  x = Reshape([-1, 1])(x)
+    input_layer = tf.keras.layers.Input(shape=[input_size])
+    x = input_layer
+    x = PreprocessRaw(x)
+    x = tf.keras.layers.Reshape([-1, 1])(x)
 
-  def _reduce_conv(x, num_filters, k, strides=2, padding='same'):
-    x = Conv1D(num_filters, k, padding=padding, strides=strides,
-               kernel_regularizer=l2(0.00001), use_bias=False)(x)
-    x = BatchNormalization()(x)
-    x = Activation(relu6)(x)
-    return x
+    def _reduce_conv(x, num_filters, k, strides=2, padding='same'):
+        x = tf.keras.layers.Conv1D(num_filters, k, padding=padding, strides=strides,
+                       kernel_regularizer=tf.keras.regularizers.l2(0.00001), use_bias=False)(x)
+        x = tf.keras.layers.BatchNormalization()(x)
+        x = tf.keras.layers.Activation(tf.nn.relu6)(x)
+        return x
 
-  def _context_conv(x, num_filters, k, dilation_rate=1, padding='same'):
-    x = Conv1D(num_filters, k, padding=padding, dilation_rate=dilation_rate,
-               kernel_regularizer=l2(0.00001), use_bias=False)(x)
-    x = BatchNormalization()(x)
-    x = Activation(relu6)(x)
-    return x
-
-  def _stem(x):
-    x = _reduce_conv(x, 32, 5, strides=4, padding='valid')  # ~4000
-    x = _context_conv(x, 32, 3, padding='valid')
-    x = _reduce_conv(x, 64, 3, padding='valid')  # ~2000
-    x = _context_conv(x, 64, 3, padding='valid')
-    x = _reduce_conv(x, 128, 3, padding='valid')  # ~1000
-    x = _context_conv(x, 128, 3, padding='valid')
-    x = _reduce_conv(x, 256, 3, padding='valid')  # ~500
-    x = _context_conv(x, 256, 3, padding='valid')
-    x = _reduce_conv(x, 384, 3, padding='valid')  # ~250
-    x = _context_conv(x, 384, 3, padding='valid')
-    x = _reduce_conv(x, 512, 3, padding='valid')  # ~125
-    x = _context_conv(x, 512, 3, padding='valid')
-    return x
 
   def _inception_block(x, base_num, block_id):
     branch1x1 = _context_conv(x, int(2 * base_num), 1)
